@@ -1,14 +1,15 @@
-import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Optional
+from bson import ObjectId
 
-from database import create_document, get_documents
 from schemas import DonationPledge, ContactMessage, Story, VolunteerApplication
+from database import db, create_document, get_documents
 
-app = FastAPI(title="ChildHope API", description="Backend for the ChildHope organisation website")
+app = FastAPI(title="ChildHope API", version="1.0.0")
 
+# CORS (allow all for dev)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,109 +18,127 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "ChildHope backend is running"}
+
+class HealthResponse(BaseModel):
+    status: str
+    message: str
+
+
+@app.get("/", response_model=HealthResponse)
+async def root():
+    return {"status": "ok", "message": "ChildHope backend is running"}
+
 
 @app.get("/api/hello")
-def hello():
-    return {"message": "Hello from ChildHope backend!"}
+async def hello():
+    return {"message": "Hello from ChildHope API"}
+
 
 @app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
+async def test():
+    state = {
+        "backend": "ok",
+        "database": "connected" if db is not None else "not_configured",
     }
-    try:
-        from database import db
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-            response["database_name"] = getattr(db, 'name', None) or ("✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set")
-            response["connection_status"] = "Connected"
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:80]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-    except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:80]}"
+    # Try a harmless DB op if available
+    if db is not None:
+        try:
+            db["__heartbeat__"].insert_one({"at": "ping"})
+            state["db_write"] = "ok"
+        except Exception as e:
+            state["db_write"] = f"error: {e}" 
+    return state
 
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    return response
 
-# Public endpoints used by the website
+# Utilities
+
+def serialize_doc(doc):
+    if not doc:
+        return doc
+    d = dict(doc)
+    _id = d.get("_id")
+    if isinstance(_id, ObjectId):
+        d["_id"] = str(_id)
+    # Convert datetimes to isoformat if needed
+    for k, v in list(d.items()):
+        try:
+            import datetime
+            if isinstance(v, (datetime.datetime, datetime.date)):
+                d[k] = v.isoformat()
+        except Exception:
+            pass
+    return d
+
 
 @app.post("/api/pledge")
-def create_pledge(payload: DonationPledge) -> Dict[str, str]:
+async def create_pledge(payload: DonationPledge):
     try:
-        doc_id = create_document("donationpledge", payload)
-        return {"status": "ok", "id": doc_id}
+        inserted_id = create_document("donationpledge", payload)
+        return {"status": "ok", "id": inserted_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/contact")
-def create_contact(payload: ContactMessage) -> Dict[str, str]:
+async def create_contact(payload: ContactMessage):
     try:
-        doc_id = create_document("contactmessage", payload)
-        return {"status": "ok", "id": doc_id}
+        inserted_id = create_document("contactmessage", payload)
+        return {"status": "ok", "id": inserted_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/volunteer")
-def create_volunteer(payload: VolunteerApplication) -> Dict[str, str]:
+async def create_volunteer(payload: VolunteerApplication):
     try:
-        doc_id = create_document("volunteerapplication", payload)
-        return {"status": "ok", "id": doc_id}
+        inserted_id = create_document("volunteerapplication", payload)
+        return {"status": "ok", "id": inserted_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/stories")
-def list_stories(limit: int = 6) -> List[Dict[str, Any]]:
-    try:
-        docs = get_documents("story", {}, limit)
-        # Normalize ObjectId and timestamps to strings for frontend safety
-        for d in docs:
-            if "_id" in d:
-                d["_id"] = str(d["_id"])  # type: ignore
-            for key in ("created_at", "updated_at"):
-                if key in d:
-                    d[key] = str(d[key])
-        return docs
-    except Exception as e:
-        # Return a friendly fallback with sample stories if DB missing
-        return [
-            {
-                "_id": "demo-1",
-                "title": "A backpack of dreams",
-                "summary": "Your support helped Aisha get back to school with supplies and mentorship.",
-                "image_url": "https://images.unsplash.com/photo-1600880292089-90e7e86ec5e1?q=80&w=1200&auto=format&fit=crop"
-            },
-            {
-                "_id": "demo-2",
-                "title": "From street to classroom",
-                "summary": "Rahul found a safe classroom and hot meals through our outreach program.",
-                "image_url": "https://images.unsplash.com/photo-1529158062015-cad636e205a0?q=80&w=1200&auto=format&fit=crop"
-            },
-            {
-                "_id": "demo-3",
-                "title": "Community library opens",
-                "summary": "A new reading room now serves 120 children every week.",
-                "image_url": "https://images.unsplash.com/photo-1519681393784-d120267933ba?q=80&w=1200&auto=format&fit=crop"
-            }
-        ]
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.get("/api/stories")
+async def list_stories(limit: Optional[int] = 6):
+    # If DB configured, read from collection; otherwise return demo data
+    try:
+        if db is not None:
+            docs = get_documents("story", {}, limit=limit)
+            return [serialize_doc(d) for d in docs]
+    except Exception:
+        # fall back to demo data on any db error
+        pass
+
+    demo: List[dict] = [
+        {
+            "title": "Asha's First Day Back",
+            "summary": "After months away, Asha returned to school with a backpack full of supplies and a heart full of hope.",
+            "image_url": "https://images.unsplash.com/photo-1511988617509-a57c8a288659?q=80&w=1600&auto=format&fit=crop",
+        },
+        {
+            "title": "Meals that Matter",
+            "summary": "Your support funded 200 weekly meal kits for families in our community.",
+            "image_url": "https://images.unsplash.com/photo-1472162072942-cd5147eb3902?q=80&w=1600&auto=format&fit=crop",
+        },
+        {
+            "title": "Safe Spaces After School",
+            "summary": "Children gather at our hubs to learn, play, and find mentors who believe in them.",
+            "image_url": "https://images.unsplash.com/photo-1509062522246-3755977927d7?q=80&w=1600&auto=format&fit=crop",
+        },
+    ]
+    return demo[: limit or 6]
+
+
+# Optional: expose schemas for admin tools
+@app.get("/schema")
+async def get_schema_info():
+    return {
+        "collections": [
+            "donationpledge",
+            "contactmessage",
+            "volunteerapplication",
+            "story",
+        ]
+    }
+
+
+# Run with: uvicorn main:app --reload
